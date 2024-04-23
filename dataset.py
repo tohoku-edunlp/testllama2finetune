@@ -6,6 +6,8 @@ from tqdm import tqdm
 from torch.utils.data import Dataset
 import json
 import argparse
+from torch.nn.utils.rnn import pad_sequence
+from torch.utils.data import DataLoader
 
 
 parser = argparse.ArgumentParser()
@@ -20,6 +22,7 @@ device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 print(torch.cuda.get_device_name())
 print("使用デバイス:", device)
 
+
 tokenizer = AutoTokenizer.from_pretrained(model, token=True)
 pipeline = transformers.pipeline(
     "text-generation",
@@ -30,6 +33,8 @@ pipeline = transformers.pipeline(
 
 )
 
+
+tokenizer.pad_token = tokenizer.eos_token
 
 class InstructDataset(Dataset):
     def __init__(self, json_data, tokenizer, ignore_index=-100):
@@ -56,13 +61,6 @@ class InstructDataset(Dataset):
                 # LLMが生成してほしい正解の文章として入力文をそのままコピーする
                 labels = copy.deepcopy(input_ids)
                 
-                # 指示文までの長さ
-                source_len = source_tokenized['length'][0]
-                
-                # LLMに生成してほしい正解文章に指示文も含まれているので、
-                # 指示文のところはCrossEntropyLossの損失を計算をしないようにIGNORE_INDEXとして-100で埋める
-                labels[:source_len] = self.ignore_index
-                
                 self.features.append({
                     'input_ids': input_ids,
                     'labels': labels
@@ -76,5 +74,40 @@ class InstructDataset(Dataset):
 
 
 train_dataset = InstructDataset(args.json_file, tokenizer)
-print(train_dataset[0])
+#print(train_dataset[0])
 
+class InstructCollator():
+    def __init__(self, tokenizer, ignore_index=-100):
+        self.tokenizer = tokenizer
+        self.ignore_index = -100
+
+    def __call__(self, examples):
+        input_batch = []
+        label_batch = []
+        for example in examples:
+            input_batch.append(example['input_ids'])
+            label_batch.append(example['labels'])
+        
+        input_ids = pad_sequence(
+            input_batch, batch_first=True, padding_value=self.tokenizer.pad_token_id
+        )
+
+        # labelsのpaddingトークンは先程と同様にignore_indexである-100で埋める
+        labels = pad_sequence(
+            label_batch, batch_first=True, padding_value=self.ignore_index
+        )
+
+        # attention_maskはbool値でもいいらしい
+        attention_mask = input_ids.ne(self.tokenizer.pad_token_id)
+            
+        return {
+            'input_ids': input_ids,
+            'labels': labels,
+            'attention_mask': attention_mask
+        }
+
+
+collator = InstructCollator(tokenizer)
+loader = DataLoader(train_dataset, collate_fn=collator, batch_size=8, shuffle=True)
+batch = next(iter(loader))
+print(batch)
